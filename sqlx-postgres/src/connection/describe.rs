@@ -443,6 +443,16 @@ WHERE rngtypid = $1
             );
         }
 
+        let parameter_statuses = &self.inner.stream.parameter_statuses;
+        let is_cockroachdb = parameter_statuses.contains_key("crdb_version");
+        let is_materialize = parameter_statuses.contains_key("mz_version");
+        let is_questdb = parameter_statuses
+            .get("application_name")
+            .is_some_and(|a| a == "QuestDB");
+
+        const TYPES: &[[&str; 2]] = &[["::int4", "::int2"], ["::int", "::short"]];
+        let types = if !is_questdb { &TYPES[0] } else { &TYPES[1] };
+
         // Query for NOT NULL constraints for each column in the query.
         //
         // This will include columns that don't have a `relation_id` (are not from a table);
@@ -456,26 +466,32 @@ WHERE rngtypid = $1
             separated.push("( SELECT ");
             separated
                 .push_bind_unseparated(i)
-                .push_unseparated("::int4 AS idx, ");
+                .push_unseparated(types[0])
+                .push_unseparated(" AS idx, ");
             separated
                 .push_bind_unseparated(column.relation_id)
-                .push_unseparated("::int4 AS table_id, ");
+                .push_unseparated(types[0])
+                .push_unseparated(" AS table_id, ");
             separated
                 .push_bind_unseparated(column.relation_attribute_no)
-                .push_unseparated("::int2 AS col_idx ) ");
+                .push_unseparated(types[1])
+                .push_unseparated(" AS col_idx ) ");
         }
 
         for (column, i) in column_iter {
             separated.push("( SELECT ");
             separated
                 .push_bind_unseparated(i)
-                .push_unseparated("::int4, ");
+                .push_unseparated(types[0])
+                .push_unseparated(", ");
             separated
                 .push_bind_unseparated(column.relation_id)
-                .push_unseparated("::int4, ");
+                .push_unseparated(types[0])
+                .push_unseparated(", ");
             separated
                 .push_bind_unseparated(column.relation_attribute_no)
-                .push_unseparated("::int2 ) ");
+                .push_unseparated(types[1])
+                .push_unseparated(" ) ");
         }
 
         nullable_query.push(
@@ -498,17 +514,7 @@ WHERE rngtypid = $1
             })?;
 
         // If the server is CockroachDB or Materialize, skip this step (#1248).
-        if !self
-            .inner
-            .stream
-            .parameter_statuses
-            .contains_key("crdb_version")
-            && !self
-                .inner
-                .stream
-                .parameter_statuses
-                .contains_key("mz_version")
-        {
+        if !is_cockroachdb && !is_materialize && !is_questdb {
             // patch up our null inference with data from EXPLAIN
             let nullable_patch = self
                 .nullables_from_explain(stmt_id, meta.parameters.len())
